@@ -13,6 +13,7 @@ using Gumbo
 #
 
 const URL::AbstractString = "https://parlinfo.aph.gov.au/sitemap/sitemapindex.xml"
+YEARS::UnitRange{Int} = 1901:9999
 
 #
 # === Types ===
@@ -106,6 +107,12 @@ function get_args()
         "--skip", "-s"
         action = :store_true
         help = "Skip processing, usually combined with -c to compress a completed run"
+
+        "--years", "-y"
+        required = false
+        arg_type = AbstractString
+        default = "1901:9999"
+        help = "Only fetch sitting days in this range of years, e.g. `2024:2026` or `1998`"
     end
     return parse_args(s; as_symbols=true)
 end
@@ -115,7 +122,20 @@ end
 # === Main ===
 #
 
-function run(; sxml_house::SXMLHouse, output::AbstractString, should_compress::Bool, skip::Bool)::Bool
+# "2024:2026" -> 2024:2026, "1998" -> 1998:1998
+function parse_years(years::AbstractString)::UnitRange{Int}
+    parts = parse.(Int, split(years, ":"))
+    return length(parts) == 1 ? (parts[1]:parts[1]) : (parts[1]:parts[2])
+end
+
+# Year from a date-based ParlInfo address, or nothing for addresses with a numeric record id
+function year_in_url(url::AbstractString)
+    m = match(r"/((?:18|19|20)\d\d)-\d\d-\d\d/", replace(url, "%2F" => "/"))
+    return isnothing(m) ? nothing : parse(Int, m.captures[1])
+end
+
+function run(; sxml_house::SXMLHouse, output::AbstractString, should_compress::Bool, skip::Bool, years::AbstractString="1901:9999")::Bool
+    global YEARS = parse_years(years)
     paths = SXMLPaths(output, string(sxml_house))
     success = true
     if !skip
@@ -133,7 +153,6 @@ function run(; sxml_house::SXMLHouse, output::AbstractString, should_compress::B
         success &= with_logger(logger) do
             run(Val(Step1); paths=paths, sxml_house=sxml_house)
         end
-        success &= run(Val(Step1); paths=paths, sxml_house=sxml_house)
     end
     success &= run(Val(Step7); paths=paths, should_compress=should_compress)
     return success
@@ -213,6 +232,8 @@ end
 function run(::Val{Step4}; paths::SXMLPaths, sxml_house::SXMLHouse)::Bool
     htmls_out = paths.htmls
     urls = readlines(joinpath(paths.interim, "missing_urls.txt"))
+    # Addresses with a date outside --years are skipped; numeric record ids are filtered in step 6
+    urls = filter(u -> (y = year_in_url(u); isnothing(y) || y in YEARS), urls)
     if length(urls) == 0
         @info "Step 4 already completed as no new urls are requested"
     else
@@ -275,6 +296,7 @@ function run(::Val{Step6}; paths::SXMLPaths, sxml_house::SXMLHouse)::Bool
             continue
         end
         day, month, year = split(date, "-")
+        parse(Int, year) in YEARS || continue
         out = joinpath(xmls_out, year, "$(year)_$(month)_$(day).xml")
         mkpath(dirname(out))
         download_file(xml, out; filetype="text/xml")
